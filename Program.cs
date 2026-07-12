@@ -1,6 +1,8 @@
-﻿using System;
+using System;
 using Tesseract;
 using System.Diagnostics;
+using System.IO;
+using PDFtoImage;
 
 namespace ConsoleApplication
 {
@@ -18,53 +20,42 @@ namespace ConsoleApplication
 			{
 				var logger = new FormattedConsoleLogger();
 				var resultPrinter = new ResultPrinter(logger);
-				using (var engine = new TesseractEngine(@"./tessdata", "eng", EngineMode.Default))
+				using (var engine = new TesseractEngine(@"./tessdata/eng", "eng", EngineMode.Default))
 				{
-					using (var img = Pix.LoadFromFile(testImagePath))
+					if (Path.GetExtension(testImagePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
+					{
+						string tempDir = Path.Combine(Path.GetTempPath(), "OCR_PDF_" + Guid.NewGuid().ToString("N"));
+						try
+						{
+							using (logger.Begin("Process PDF"))
+							{
+								logger.Log("Converting {0} to PNG images...", testImagePath);
+								string[] images = ConvertPdfToImages(testImagePath, tempDir);
+								logger.Log("Converted {0} pages.", images.Length);
+
+								for (int pageIdx = 0; pageIdx < images.Length; pageIdx++)
+								{
+									string imgPath = images[pageIdx];
+									using (logger.Begin("Page {0}", pageIdx + 1))
+									{
+										ProcessImageFile(engine, imgPath, logger);
+									}
+								}
+							}
+						}
+						finally
+						{
+							if (Directory.Exists(tempDir))
+							{
+								Directory.Delete(tempDir, true);
+							}
+						}
+					}
+					else
 					{
 						using (logger.Begin("Process image"))
 						{
-							var i = 1;
-							using (var page = engine.Process(img))
-							{
-								var text = page.GetText();
-								logger.Log("Text: {0}", text);
-								logger.Log("Mean confidence: {0}", page.GetMeanConfidence());
-
-								using (var iter = page.GetIterator())
-								{
-									iter.Begin();
-									do
-									{
-										if (i % 2 == 0)
-										{
-											using (logger.Begin("Line {0}", i))
-											{
-												do
-												{
-													using (logger.Begin("Word Iteration"))
-													{
-														if (iter.IsAtBeginningOf(PageIteratorLevel.Block))
-														{
-															logger.Log("New block");
-														}
-														if (iter.IsAtBeginningOf(PageIteratorLevel.Para))
-														{
-															logger.Log("New paragraph");
-														}
-														if (iter.IsAtBeginningOf(PageIteratorLevel.TextLine))
-														{
-															logger.Log("New line");
-														}
-														logger.Log("word: " + iter.GetText(PageIteratorLevel.Word));
-													}
-												} while (iter.Next(PageIteratorLevel.TextLine, PageIteratorLevel.Word));
-											}
-										}
-										i++;
-									} while (iter.Next(PageIteratorLevel.Para, PageIteratorLevel.TextLine));
-								}
-							}
+							ProcessImageFile(engine, testImagePath, logger);
 						}
 					}
 				}
@@ -76,8 +67,87 @@ namespace ConsoleApplication
 				Console.WriteLine("Details: ");
 				Console.WriteLine(e.ToString());
 			}
-			Console.Write("Press any key to continue . . . ");
-			Console.ReadKey(true);
+
+			if (!Console.IsInputRedirected)
+			{
+				Console.Write("Press any key to continue . . . ");
+				Console.ReadKey(true);
+			}
+		}
+
+		private static string[] ConvertPdfToImages(string pdfPath, string outputDir)
+		{
+			var imagePaths = new List<string>();
+			if (!Directory.Exists(outputDir))
+			{
+				Directory.CreateDirectory(outputDir);
+			}
+
+			int pageCount;
+			using (var pageCountStream = File.OpenRead(pdfPath))
+			{
+				pageCount = PDFtoImage.Conversion.GetPageCount(pageCountStream);
+			}
+
+			for (int i = 0; i < pageCount; i++)
+			{
+				string outPath = Path.Combine(outputDir, $"page_{i + 1}.png");
+				using (var pageStream = File.OpenRead(pdfPath))
+				{
+					// Use 300 DPI for high quality OCR output
+					PDFtoImage.Conversion.SavePng(outPath, pageStream, page: i, options: new RenderOptions(Dpi: 300));
+				}
+				imagePaths.Add(outPath);
+			}
+			return imagePaths.ToArray();
+		}
+
+		private static void ProcessImageFile(TesseractEngine engine, string imagePath, FormattedConsoleLogger logger)
+		{
+			using (var img = Pix.LoadFromFile(imagePath))
+			{
+				using (var page = engine.Process(img))
+				{
+					var text = page.GetText();
+					logger.Log("Text: {0}", text);
+					logger.Log("Mean confidence: {0}", page.GetMeanConfidence());
+
+					using (var iter = page.GetIterator())
+					{
+						iter.Begin();
+						var i = 1;
+						do
+						{
+							if (i % 2 == 0)
+							{
+								using (logger.Begin("Line {0}", i))
+								{
+									do
+									{
+										using (logger.Begin("Word Iteration"))
+										{
+											if (iter.IsAtBeginningOf(PageIteratorLevel.Block))
+											{
+												logger.Log("New block");
+											}
+											if (iter.IsAtBeginningOf(PageIteratorLevel.Para))
+											{
+												logger.Log("New paragraph");
+											}
+											if (iter.IsAtBeginningOf(PageIteratorLevel.TextLine))
+											{
+												logger.Log("New line");
+											}
+											logger.Log("word: " + iter.GetText(PageIteratorLevel.Word));
+										}
+									} while (iter.Next(PageIteratorLevel.TextLine, PageIteratorLevel.Word));
+								}
+							}
+							i++;
+						} while (iter.Next(PageIteratorLevel.Para, PageIteratorLevel.TextLine));
+					}
+				}
+			}
 		}
 
 

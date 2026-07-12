@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "OCR_Test": {
+      "commandName": "Project",
+      "commandLineArgs": "\"C:\\Users\\maxro_000\\Downloads\\Purchase document.pdf\""
+    }
+  }
+}
