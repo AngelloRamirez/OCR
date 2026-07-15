@@ -3,6 +3,7 @@ using Tesseract;
 using System.Diagnostics;
 using System.IO;
 using PDFtoImage;
+using System.Text.Json;
 
 namespace ConsoleApplication
 {
@@ -10,6 +11,18 @@ namespace ConsoleApplication
 	{
 		public static void Main(string[] args)
 		{
+			if (args.Length > 0 && args[0].Equals("--test-token", StringComparison.OrdinalIgnoreCase))
+			{
+				TestAzureAdToken();
+				return;
+			}
+
+			if (args.Length > 0 && args[0].Equals("--test-bc", StringComparison.OrdinalIgnoreCase))
+			{
+				TestBusinessCentral();
+				return;
+			}
+
 			var testImagePath = "./phototest.tif";
 			if (args.Length > 0)
 			{
@@ -75,6 +88,113 @@ namespace ConsoleApplication
 			}
 		}
 
+		private static void TestAzureAdToken()
+		{
+			Console.WriteLine("=== Iniciando prueba de AzureAdTokenProvider ===");
+			try
+			{
+				var provider = new AzureAdTokenProvider();
+				Console.WriteLine("Instanciado correctamente.");
+				
+				// Intentamos primero con el scope configurado en appsettings
+				Console.WriteLine("1. Intentando con el scope configurado en appsettings...");
+				try
+				{
+					var token1 = provider.GetAccessTokenAsync().GetAwaiter().GetResult();
+					Console.WriteLine($"Token 1 (scope de appsettings) obtenido con éxito. Longitud: {token1.Length}");
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"Error con scope de appsettings: {ex.Message}");
+				}
+
+				// Intentamos con Microsoft Graph
+				Console.WriteLine("\n2. Intentando con scope de Microsoft Graph...");
+				try
+				{
+					var graphToken1 = provider.GetAccessTokenAsync("https://graph.microsoft.com/.default").GetAwaiter().GetResult();
+					Console.WriteLine($"Graph Token obtenido con éxito. Longitud: {graphToken1.Length}");
+					Console.WriteLine($"Token corto: {graphToken1.Substring(0, Math.Min(30, graphToken1.Length))}...");
+
+					Console.WriteLine("Obteniendo segundo Graph Token (debería venir de caché)...");
+					var graphToken2 = provider.GetAccessTokenAsync("https://graph.microsoft.com/.default").GetAwaiter().GetResult();
+					if (graphToken1 == graphToken2)
+					{
+						Console.WriteLine("¡Éxito! El token de Graph proviene de la caché (mismo valor).");
+					}
+					else
+					{
+						Console.WriteLine("Advertencia: El token obtenido es diferente.");
+					}
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"Error con scope de Graph: {ex.Message}");
+				}
+
+				// Intentamos con Business Central
+				Console.WriteLine("\n3. Intentando con scope de Business Central...");
+				try
+				{
+					var bcToken = provider.GetAccessTokenAsync("https://api.businesscentral.dynamics.com/.default").GetAwaiter().GetResult();
+					Console.WriteLine($"Business Central Token obtenido con éxito. Longitud: {bcToken.Length}");
+					Console.WriteLine($"Token corto: {bcToken.Substring(0, Math.Min(30, bcToken.Length))}...");
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"Error con scope de Business Central: {ex.Message}");
+				}
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine($"Error durante la prueba general: {ex}");
+			}
+			Console.WriteLine("=== Fin de la prueba ===");
+		}
+
+		private static void TestBusinessCentral()
+		{
+			Console.WriteLine("=== Iniciando prueba de BusinessCentralClient con OCRUtilities_ProcessText ===");
+			try
+			{
+				var tokenProvider = new AzureAdTokenProvider();
+				var client = new BusinessCentralClient(tokenProvider);
+				Console.WriteLine("Cliente instanciado correctamente.");
+
+				// Simulamos datos de prueba de OCR
+				var dummyData = new
+				{
+					inputText = "{\"1\":\"Línea de prueba de OCR 1\",\"2\":\"Línea de prueba de OCR 2\"}"
+				};
+
+				string serviceName = "OCRUtilities_ProcessText"; 
+				string url = client.BuildUrl(serviceName);
+				Console.WriteLine($"\nURL generada para el servicio '{serviceName}':");
+				Console.WriteLine(url);
+
+				Console.WriteLine("\nIntentando enviar petición de prueba...");
+				try
+				{
+					var response = client.SendRequestAsync(serviceName, dummyData).GetAwaiter().GetResult();
+					Console.WriteLine("Respuesta recibida exitosamente:");
+					Console.WriteLine(response);
+				}
+				catch (HttpRequestException httpEx)
+				{
+					Console.WriteLine($"Petición HTTP falló: {httpEx.Message}");
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"Error al enviar: {ex.Message}");
+				}
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine($"Error durante la prueba general: {ex}");
+			}
+			Console.WriteLine("=== Fin de la prueba ===");
+		}
+
 		private static string[] ConvertPdfToImages(string pdfPath, string outputDir)
 		{
 			var imagePaths = new List<string>();
@@ -111,6 +231,48 @@ namespace ConsoleApplication
 					var text = page.GetText();
 					logger.Log("Text: {0}", text);
 					logger.Log("Mean confidence: {0}", page.GetMeanConfidence());
+
+					// Tomar línea por línea y meterlo dentro de un JSON (llave = número de línea, valor = texto)
+					var lines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+					var lineDict = new Dictionary<string, string>();
+					for (int idx = 0; idx < lines.Length; idx++)
+					{
+						lineDict[(idx + 1).ToString()] = lines[idx];
+					}
+					string linesJson = JsonSerializer.Serialize(lineDict);
+
+					using (logger.Begin("Send OCR JSON to Business Central"))
+					{
+						try
+						{
+							var tokenProvider = new AzureAdTokenProvider();
+							var client = new BusinessCentralClient(tokenProvider);
+
+							var payload = new
+							{
+								inputText = linesJson
+							};
+
+							logger.Log("Enviando JSON al servicio OCRUtilities_ProcessText...");
+							string response = client.SendRequestAsync("OCRUtilities_ProcessText", payload).GetAwaiter().GetResult();
+							logger.Log("Respuesta de Business Central: {0}", response);
+
+							// Parsear y comprobar el booleano devuelto
+							using var responseDoc = JsonDocument.Parse(response);
+							if (responseDoc.RootElement.TryGetProperty("value", out var valProp) && valProp.ValueKind == JsonValueKind.True)
+							{
+								logger.Log("El servicio regresó True (se recibió y procesó el texto con éxito).");
+							}
+							else
+							{
+								logger.Log("El servicio regresó False o no se recibió el texto.");
+							}
+						}
+						catch (Exception ex)
+						{
+							logger.Log("Error al enviar al servicio de Business Central: {0}", ex.Message);
+						}
+					}
 
 					using (var iter = page.GetIterator())
 					{

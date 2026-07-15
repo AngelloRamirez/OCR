@@ -2,7 +2,10 @@
   "profiles": {
     "OCR_Test": {
       "commandName": "Project",
-      "commandLineArgs": "\"C:\\Users\\maxro_000\\Downloads\\Purchase document.pdf\""
+      "commandLineArgs": "C:\\Users\\maxro_000\\Downloads\\PSI-000015.pdf",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
     }
   }
 }
