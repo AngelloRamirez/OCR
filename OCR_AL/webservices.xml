@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ExportedData>
+    <TenantWebServiceColletion>
+        <TenantWebService>
+            <ObjectType>Codeunit</ObjectType>
+            <ObjectID>56800</ObjectID>
+            <ServiceName>OCRUtilities</ServiceName>
+            <Published>true</Published>
+        </TenantWebService>
+    </TenantWebServiceColletion>
+</ExportedData>
