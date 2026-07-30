@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using PDFtoImage;
 using System.Text.Json;
+using System.Net.Http;
 
 namespace ConsoleApplication
 {
@@ -11,29 +12,32 @@ namespace ConsoleApplication
 	{
 		public static void Main(string[] args)
 		{
-			if (args.Length > 0 && args[0].Equals("--test-token", StringComparison.OrdinalIgnoreCase))
-			{
-				TestAzureAdToken();
-				return;
-			}
-
-			if (args.Length > 0 && args[0].Equals("--test-bc", StringComparison.OrdinalIgnoreCase))
-			{
-				TestBusinessCentral();
-				return;
-			}
-
 			var testImagePath = "./phototest.tif";
-			if (args.Length > 0)
+			var lang = "eng";
+
+			for (int i = 0; i < args.Length; i++)
 			{
-				testImagePath = args[0];
+				if ((args[i].Equals("--lang", StringComparison.OrdinalIgnoreCase) || args[i].Equals("-l", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+				{
+					lang = args[i + 1];
+					i++;
+				}
+				else if (!args[i].StartsWith("-"))
+				{
+					testImagePath = args[i];
+				}
 			}
 
 			try
 			{
 				var logger = new FormattedConsoleLogger();
 				var resultPrinter = new ResultPrinter(logger);
-				using (var engine = new TesseractEngine(@"./tessdata/eng", "eng", EngineMode.Default))
+				var pagesData = new List<Dictionary<string, string>>();
+
+				EnsureLanguageData(lang, logger);
+				string tessDataPath = Path.Combine(".", "tessdata", lang);
+
+				using (var engine = new TesseractEngine(tessDataPath, lang, EngineMode.Default))
 				{
 					if (Path.GetExtension(testImagePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
 					{
@@ -51,7 +55,8 @@ namespace ConsoleApplication
 									string imgPath = images[pageIdx];
 									using (logger.Begin("Page {0}", pageIdx + 1))
 									{
-										ProcessImageFile(engine, imgPath, logger);
+										var pageDict = ProcessImageFile(engine, imgPath, logger);
+										pagesData.Add(pageDict);
 									}
 								}
 							}
@@ -68,7 +73,45 @@ namespace ConsoleApplication
 					{
 						using (logger.Begin("Process image"))
 						{
-							ProcessImageFile(engine, testImagePath, logger);
+							var pageDict = ProcessImageFile(engine, testImagePath, logger);
+							pagesData.Add(pageDict);
+						}
+					}
+
+					if (pagesData.Count > 0)
+					{
+						using (logger.Begin("Send OCR JSON to Business Central"))
+						{
+							try
+							{
+								string documentJson = JsonSerializer.Serialize(pagesData);
+								var tokenProvider = new AzureAdTokenProvider();
+								var client = new BusinessCentralClient(tokenProvider);
+
+								var payload = new
+								{
+									inputText = documentJson
+								};
+
+								logger.Log("Enviando JSON con {0} páginas al servicio OCRUtilities_ProcessText...", pagesData.Count);
+								string response = client.SendRequestAsync("OCRUtilities_ProcessText", payload).GetAwaiter().GetResult();
+								logger.Log("Respuesta de Business Central: {0}", response);
+
+								// Parsear y comprobar el booleano devuelto
+								using var responseDoc = JsonDocument.Parse(response);
+								if (responseDoc.RootElement.TryGetProperty("value", out var valProp) && valProp.ValueKind == JsonValueKind.True)
+								{
+									logger.Log("El servicio regresó True (se recibió y procesó el texto con éxito).");
+								}
+								else
+								{
+									logger.Log("El servicio regresó False o no se recibió el texto.");
+								}
+							}
+							catch (Exception ex)
+							{
+								logger.Log("Error al enviar al servicio de Business Central: {0}", ex.Message);
+							}
 						}
 					}
 				}
@@ -195,6 +238,55 @@ namespace ConsoleApplication
 			Console.WriteLine("=== Fin de la prueba ===");
 		}
 
+		private static void EnsureLanguageData(string lang, FormattedConsoleLogger logger)
+		{
+			string langDir = Path.Combine(".", "tessdata", lang);
+			string filePath = Path.Combine(langDir, $"{lang}.traineddata");
+
+			if (File.Exists(filePath))
+			{
+				return;
+			}
+
+			if (!Directory.Exists(langDir))
+			{
+				Directory.CreateDirectory(langDir);
+			}
+
+			using (logger.Begin($"Download Tesseract data for language '{lang}'"))
+			{
+				string url = $"https://github.com/tesseract-ocr/tessdata/raw/main/{lang}.traineddata";
+				logger.Log("Downloading {0} to {1}...", url, filePath);
+
+				try
+				{
+					using (var client = new HttpClient())
+					{
+						// Increase timeout for large file download
+						client.Timeout = TimeSpan.FromMinutes(5);
+						using (var response = client.GetAsync(url).GetAwaiter().GetResult())
+						{
+							response.EnsureSuccessStatusCode();
+							using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
+							{
+								response.Content.CopyToAsync(fs).GetAwaiter().GetResult();
+							}
+						}
+					}
+					logger.Log("Download completed successfully.");
+				}
+				catch (Exception ex)
+				{
+					logger.Log("Error downloading language data: {0}", ex.Message);
+					if (File.Exists(filePath))
+					{
+						try { File.Delete(filePath); } catch {}
+					}
+					throw;
+				}
+			}
+		}
+
 		private static string[] ConvertPdfToImages(string pdfPath, string outputDir)
 		{
 			var imagePaths = new List<string>();
@@ -222,7 +314,7 @@ namespace ConsoleApplication
 			return imagePaths.ToArray();
 		}
 
-		private static void ProcessImageFile(TesseractEngine engine, string imagePath, FormattedConsoleLogger logger)
+		private static Dictionary<string, string> ProcessImageFile(TesseractEngine engine, string imagePath, FormattedConsoleLogger logger)
 		{
 			using (var img = Pix.LoadFromFile(imagePath))
 			{
@@ -238,40 +330,6 @@ namespace ConsoleApplication
 					for (int idx = 0; idx < lines.Length; idx++)
 					{
 						lineDict[(idx + 1).ToString()] = lines[idx];
-					}
-					string linesJson = JsonSerializer.Serialize(lineDict);
-
-					using (logger.Begin("Send OCR JSON to Business Central"))
-					{
-						try
-						{
-							var tokenProvider = new AzureAdTokenProvider();
-							var client = new BusinessCentralClient(tokenProvider);
-
-							var payload = new
-							{
-								inputText = linesJson
-							};
-
-							logger.Log("Enviando JSON al servicio OCRUtilities_ProcessText...");
-							string response = client.SendRequestAsync("OCRUtilities_ProcessText", payload).GetAwaiter().GetResult();
-							logger.Log("Respuesta de Business Central: {0}", response);
-
-							// Parsear y comprobar el booleano devuelto
-							using var responseDoc = JsonDocument.Parse(response);
-							if (responseDoc.RootElement.TryGetProperty("value", out var valProp) && valProp.ValueKind == JsonValueKind.True)
-							{
-								logger.Log("El servicio regresó True (se recibió y procesó el texto con éxito).");
-							}
-							else
-							{
-								logger.Log("El servicio regresó False o no se recibió el texto.");
-							}
-						}
-						catch (Exception ex)
-						{
-							logger.Log("Error al enviar al servicio de Business Central: {0}", ex.Message);
-						}
 					}
 
 					using (var iter = page.GetIterator())
@@ -308,6 +366,8 @@ namespace ConsoleApplication
 							i++;
 						} while (iter.Next(PageIteratorLevel.Para, PageIteratorLevel.TextLine));
 					}
+
+					return lineDict;
 				}
 			}
 		}
