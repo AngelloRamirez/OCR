@@ -90,7 +90,8 @@ namespace ConsoleApplication
 
 								var payload = new
 								{
-									inputText = documentJson
+									inputText = documentJson,
+									fileName = Path.GetFileName(testImagePath)
 								};
 
 								logger.Log("Enviando JSON con {0} páginas al servicio OCRUtilities_ProcessText...", pagesData.Count);
@@ -207,7 +208,8 @@ namespace ConsoleApplication
 				// Simulamos datos de prueba de OCR
 				var dummyData = new
 				{
-					inputText = "{\"1\":\"Línea de prueba de OCR 1\",\"2\":\"Línea de prueba de OCR 2\"}"
+					inputText = "{\"1\":\"Línea de prueba de OCR 1\",\"2\":\"Línea de prueba de OCR 2\"}",
+					fileName = "test_dummy.txt"
 				};
 
 				string serviceName = "OCRUtilities_ProcessText"; 
