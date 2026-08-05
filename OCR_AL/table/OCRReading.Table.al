@@ -29,6 +29,10 @@ table 56800 "OCR Reading"
         {
             Caption = 'File Name';
         }
+        field(7; "Error Message"; Text[250])
+        {
+            Caption = 'Error Message';
+        }
     }
     keys
     {

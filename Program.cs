@@ -14,10 +14,15 @@ namespace ConsoleApplication
 		{
 			var testImagePath = "./phototest.tif";
 			var lang = "eng";
+			bool runTests = false;
 
 			for (int i = 0; i < args.Length; i++)
 			{
-				if ((args[i].Equals("--lang", StringComparison.OrdinalIgnoreCase) || args[i].Equals("-l", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+				if (args[i].Equals("--test", StringComparison.OrdinalIgnoreCase))
+				{
+					runTests = true;
+				}
+				else if ((args[i].Equals("--lang", StringComparison.OrdinalIgnoreCase) || args[i].Equals("-l", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
 				{
 					lang = args[i + 1];
 					i++;
@@ -28,11 +33,17 @@ namespace ConsoleApplication
 				}
 			}
 
+			if (runTests)
+			{
+				ParserTests.RunTests();
+				return;
+			}
+
 			try
 			{
 				var logger = new FormattedConsoleLogger();
 				var resultPrinter = new ResultPrinter(logger);
-				var pagesData = new List<Dictionary<string, string>>();
+				var pagesRawText = new List<string>();
 
 				EnsureLanguageData(lang, logger);
 				string tessDataPath = Path.Combine(".", "tessdata", lang);
@@ -55,8 +66,8 @@ namespace ConsoleApplication
 									string imgPath = images[pageIdx];
 									using (logger.Begin("Page {0}", pageIdx + 1))
 									{
-										var pageDict = ProcessImageFile(engine, imgPath, logger);
-										pagesData.Add(pageDict);
+										var pageText = ProcessImageFile(engine, imgPath, logger);
+										pagesRawText.Add(pageText);
 									}
 								}
 							}
@@ -73,45 +84,59 @@ namespace ConsoleApplication
 					{
 						using (logger.Begin("Process image"))
 						{
-							var pageDict = ProcessImageFile(engine, testImagePath, logger);
-							pagesData.Add(pageDict);
+							var pageText = ProcessImageFile(engine, testImagePath, logger);
+							pagesRawText.Add(pageText);
 						}
 					}
 
-					if (pagesData.Count > 0)
+					if (pagesRawText.Count > 0)
 					{
-						using (logger.Begin("Send OCR JSON to Business Central"))
+						using (logger.Begin("Parse raw OCR text into PurchaseInvoiceData"))
 						{
-							try
+							var invoiceData = InvoiceParser.Parse(pagesRawText);
+
+							logger.Log("Factura parseada:");
+							logger.Log("  Proveedor: {0} (RFC: {1})", invoiceData.VendorName ?? "N/A", invoiceData.VendorRfc ?? "N/A");
+							logger.Log("  Folio: {0}, Fecha: {1}", invoiceData.InvoiceNo ?? "N/A", invoiceData.InvoiceDate ?? "N/A");
+							logger.Log("  Subtotal: {0}, IVA: {1}, Total: {2}", invoiceData.Subtotal?.ToString() ?? "N/A", invoiceData.TaxAmount?.ToString() ?? "N/A", invoiceData.TotalAmount?.ToString() ?? "N/A");
+							logger.Log("  Líneas de detalle: {0}", invoiceData.Lines.Count);
+							logger.Log("  Confianza general: {0}", invoiceData.Confidence.Overall);
+
+							string prettyJson = JsonSerializer.Serialize(invoiceData, new JsonSerializerOptions { WriteIndented = true });
+							string minifiedJson = JsonSerializer.Serialize(invoiceData);
+							logger.Log("JSON generado:\n{0}", prettyJson);
+
+							using (logger.Begin("Send OCR JSON to Business Central"))
 							{
-								string documentJson = JsonSerializer.Serialize(pagesData);
-								var tokenProvider = new AzureAdTokenProvider();
-								var client = new BusinessCentralClient(tokenProvider);
-
-								var payload = new
+								try
 								{
-									inputText = documentJson,
-									fileName = Path.GetFileName(testImagePath)
-								};
+									var tokenProvider = new AzureAdTokenProvider();
+									var client = new BusinessCentralClient(tokenProvider);
 
-								logger.Log("Enviando JSON con {0} páginas al servicio OCRUtilities_ProcessText...", pagesData.Count);
-								string response = client.SendRequestAsync("OCRUtilities_ProcessText", payload).GetAwaiter().GetResult();
-								logger.Log("Respuesta de Business Central: {0}", response);
+									var payload = new
+									{
+										inputText = minifiedJson,
+										fileName = Path.GetFileName(testImagePath)
+									};
 
-								// Parsear y comprobar el booleano devuelto
-								using var responseDoc = JsonDocument.Parse(response);
-								if (responseDoc.RootElement.TryGetProperty("value", out var valProp) && valProp.ValueKind == JsonValueKind.True)
-								{
-									logger.Log("El servicio regresó True (se recibió y procesó el texto con éxito).");
+									logger.Log("Enviando JSON estructurado ({0} págs) al servicio OCRUtilities_ProcessText...", pagesRawText.Count);
+									string response = client.SendRequestAsync("OCRUtilities_ProcessText", payload).GetAwaiter().GetResult();
+									logger.Log("Respuesta de Business Central: {0}", response);
+
+									using var responseDoc = JsonDocument.Parse(response);
+									if (responseDoc.RootElement.TryGetProperty("value", out var valProp) && valProp.ValueKind == JsonValueKind.True)
+									{
+										logger.Log("El servicio regresó True (se recibió y procesó el texto con éxito).");
+									}
+									else
+									{
+										logger.Log("El servicio regresó False o no se recibió el texto.");
+									}
 								}
-								else
+								catch (Exception ex)
 								{
-									logger.Log("El servicio regresó False o no se recibió el texto.");
+									logger.Log("Error al enviar al servicio de Business Central: {0}", ex.Message);
 								}
-							}
-							catch (Exception ex)
-							{
-								logger.Log("Error al enviar al servicio de Business Central: {0}", ex.Message);
 							}
 						}
 					}
@@ -316,60 +341,16 @@ namespace ConsoleApplication
 			return imagePaths.ToArray();
 		}
 
-		private static Dictionary<string, string> ProcessImageFile(TesseractEngine engine, string imagePath, FormattedConsoleLogger logger)
+		private static string ProcessImageFile(TesseractEngine engine, string imagePath, FormattedConsoleLogger logger)
 		{
 			using (var img = Pix.LoadFromFile(imagePath))
 			{
 				using (var page = engine.Process(img))
 				{
 					var text = page.GetText();
-					logger.Log("Text: {0}", text);
-					logger.Log("Mean confidence: {0}", page.GetMeanConfidence());
-
-					// Tomar línea por línea y meterlo dentro de un JSON (llave = número de línea, valor = texto)
-					var lines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-					var lineDict = new Dictionary<string, string>();
-					for (int idx = 0; idx < lines.Length; idx++)
-					{
-						lineDict[(idx + 1).ToString()] = lines[idx];
-					}
-
-					using (var iter = page.GetIterator())
-					{
-						iter.Begin();
-						var i = 1;
-						do
-						{
-							if (i % 2 == 0)
-							{
-								using (logger.Begin("Line {0}", i))
-								{
-									do
-									{
-										using (logger.Begin("Word Iteration"))
-										{
-											if (iter.IsAtBeginningOf(PageIteratorLevel.Block))
-											{
-												logger.Log("New block");
-											}
-											if (iter.IsAtBeginningOf(PageIteratorLevel.Para))
-											{
-												logger.Log("New paragraph");
-											}
-											if (iter.IsAtBeginningOf(PageIteratorLevel.TextLine))
-											{
-												logger.Log("New line");
-											}
-											logger.Log("word: " + iter.GetText(PageIteratorLevel.Word));
-										}
-									} while (iter.Next(PageIteratorLevel.TextLine, PageIteratorLevel.Word));
-								}
-							}
-							i++;
-						} while (iter.Next(PageIteratorLevel.Para, PageIteratorLevel.TextLine));
-					}
-
-					return lineDict;
+					logger.Log("Longitud del texto extraído: {0} caracteres", text?.Length ?? 0);
+					logger.Log("Confianza media de OCR: {0:P2}", page.GetMeanConfidence());
+					return text ?? string.Empty;
 				}
 			}
 		}

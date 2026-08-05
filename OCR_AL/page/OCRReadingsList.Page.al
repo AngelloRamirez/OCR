@@ -32,6 +32,10 @@ page 56800 "OCR Readings List"
                 {
                     ApplicationArea = All;
                 }
+                field("Error Message"; Rec."Error Message")
+                {
+                    ApplicationArea = All;
+                }
             }
         }
     }
@@ -60,8 +64,22 @@ page 56800 "OCR Readings List"
                 Caption = 'Create Document';
                 Image = Add;
                 trigger OnAction()
+                var
+                    OCRUtilities: Codeunit "OCR Utilities";
                 begin
-
+                    OCRUtilities.CreatePurchaseInvoiceFromJson(Rec, Rec.GetRequestText());
+                end;
+            }
+            action(test_processText)
+            {
+                applicationArea = All;
+                Caption = 'Test Process Text';
+                Image = Process;
+                visible = false;
+                trigger OnAction()
+                var
+                begin
+                    Report.Run(56800);
                 end;
             }
         }
@@ -70,4 +88,53 @@ page 56800 "OCR Readings List"
             actionref(CreateDocument_promoted; CreateDocument) { }
         }
     }
+}
+
+
+report 56800 Parameter
+{
+    UsageCategory = ReportsAndAnalysis;
+    ApplicationArea = All;
+    ProcessingOnly = true;
+
+    requestpage
+    {
+        AboutTitle = 'Teaching tip title';
+        AboutText = 'Teaching tip content';
+        layout
+        {
+            area(Content)
+            {
+                group(GroupName)
+                {
+                    field(inputtext; inputtext)
+                    {
+                        ApplicationArea = All;
+                    }
+                    field(filename; filename)
+                    {
+                        ApplicationArea = All;
+                    }
+                }
+            }
+        }
+    }
+
+    trigger OnInitReport()
+    begin
+        inputtext := 'Sample input text';
+        filename := 'sample_file.txt';
+    end;
+
+    trigger OnPostReport()
+    var
+        OCRUtilities: Codeunit "OCR Utilities";
+    begin
+        OCRUtilities.ProcessText(inputtext, filename);
+        Message('Done');
+    end;
+
+    var
+        inputtext: Text;
+        filename: Text;
 }

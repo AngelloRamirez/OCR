@@ -22,14 +22,14 @@ page 56801 "OCR JSON"
         }
     }
 
-    trigger OnOpenPage()
-    var
-        JsonMngmt: Codeunit "Json Library";
-    begin
-        OCRText := DelChr(OCRText, '<>', '[');
-        OCRText := DelChr(OCRText, '<>', ']');
-        OCRText := JsonMngmt.PrettyPrintJsonContent(OCRText);
-    end;
+    // trigger OnOpenPage()
+    // var
+    //     JsonMngmt: Codeunit "Json Library";
+    // begin
+    //     OCRText := DelChr(OCRText, '<>', '[');
+    //     OCRText := DelChr(OCRText, '<>', ']');
+    //     OCRText := JsonMngmt.PrettyPrintJsonContent(OCRText);
+    // end;
 
     procedure SetText(InputText: Text)
     begin
